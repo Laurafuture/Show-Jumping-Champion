@@ -1,0 +1,1094 @@
+import React, { useEffect, useRef, useState } from 'react';
+import * as THREE from 'three';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent } from '@/components/ui/card';
+import { Trophy, RotateCcw, Play, Pause } from 'lucide-react';
+import CharacterSelector from '../components/game/CharacterSelector';
+import HorseCare from '../components/game/HorseCare';
+import GameControls from '../components/game/GameControls';
+import ScoreBoard from '../components/game/ScoreBoard';
+
+const RIDERS = [
+  { id: 1, name: 'Emma Schmidt', speed: 0.18, jumpPower: 0.32, color: 0xff6b6b, skinColor: 0xffdbac },
+  { id: 2, name: 'Lucas Müller', speed: 0.22, jumpPower: 0.28, color: 0x4ecdc4, skinColor: 0xd4a373 },
+  { id: 3, name: 'Sophie Wagner', speed: 0.2, jumpPower: 0.35, color: 0xffe66d, skinColor: 0xffdbac },
+  { id: 4, name: 'Max Fischer', speed: 0.16, jumpPower: 0.3, color: 0x95e1d3, skinColor: 0xc68642 }
+];
+
+export default function Game() {
+  const containerRef = useRef(null);
+  const sceneRef = useRef(null);
+  const [selectedRider, setSelectedRider] = useState(null);
+  const [horseCareComplete, setHorseCareComplete] = useState(false);
+  const [gameStarted, setGameStarted] = useState(false);
+  const [countdown, setCountdown] = useState(5);
+  const [raceStarted, setRaceStarted] = useState(false);
+  const [gamePaused, setGamePaused] = useState(false);
+  const [score, setScore] = useState({ time: 0, faults: 0, points: 0 });
+  const [finished, setFinished] = useState(false);
+  const gameStateRef = useRef({
+    horse: null,
+    camera: null,
+    obstacles: [],
+    isJumping: false,
+    velocity: { x: 0, y: 0, z: 0 },
+    startTime: null,
+    clearedObstacles: new Set(),
+    clouds: [],
+    spectators: [],
+    gallopPhase: 0
+  });
+
+  // Countdown Effect
+  useEffect(() => {
+    if (gameStarted && countdown > 0) {
+      const timer = setTimeout(() => {
+        setCountdown(countdown - 1);
+      }, 1000);
+      return () => clearTimeout(timer);
+    } else if (gameStarted && countdown === 0) {
+      setTimeout(() => setRaceStarted(true), 500);
+    }
+  }, [gameStarted, countdown]);
+
+  useEffect(() => {
+    if (!containerRef.current || !selectedRider || !raceStarted || !horseCareComplete) return;
+
+    const scene = new THREE.Scene();
+    
+    const skyColor = new THREE.Color(0x4a7c59);
+    const horizonColor = new THREE.Color(0x6b9080);
+    scene.background = skyColor;
+    scene.fog = new THREE.Fog(horizonColor, 50, 180);
+    sceneRef.current = scene;
+
+    const camera = new THREE.PerspectiveCamera(
+      60,
+      containerRef.current.clientWidth / containerRef.current.clientHeight,
+      0.1,
+      1000
+    );
+    gameStateRef.current.camera = camera;
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(containerRef.current.clientWidth, containerRef.current.clientHeight);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 0.8;
+    containerRef.current.appendChild(renderer.domElement);
+
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+    scene.add(ambientLight);
+
+    const sunLight = new THREE.DirectionalLight(0xfff5e6, 1.2);
+    sunLight.position.set(50, 80, 30);
+    sunLight.castShadow = true;
+    sunLight.shadow.camera.left = -80;
+    sunLight.shadow.camera.right = 80;
+    sunLight.shadow.camera.top = 80;
+    sunLight.shadow.camera.bottom = -80;
+    sunLight.shadow.mapSize.width = 4096;
+    sunLight.shadow.mapSize.height = 4096;
+    sunLight.shadow.bias = -0.0001;
+    scene.add(sunLight);
+
+    const hemiLight = new THREE.HemisphereLight(0x6b9080, 0x3d5a45, 0.7);
+    scene.add(hemiLight);
+
+    const groundGeometry = new THREE.PlaneGeometry(200, 250, 100, 100);
+    const vertices = groundGeometry.attributes.position.array;
+    for (let i = 0; i < vertices.length; i += 3) {
+      vertices[i + 2] = Math.random() * 0.5 - 0.25;
+    }
+    groundGeometry.computeVertexNormals();
+    
+    const groundMaterial = new THREE.MeshStandardMaterial({ 
+      color: 0x3d5a45,
+      roughness: 0.95,
+      metalness: 0.05,
+      flatShading: false
+    });
+    const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+    ground.rotation.x = -Math.PI / 2;
+    ground.receiveShadow = true;
+    scene.add(ground);
+
+    const vegetationGroup = new THREE.Group();
+    for (let i = 0; i < 4000; i++) {
+      const grassBlade = new THREE.Mesh(
+        new THREE.ConeGeometry(0.05, 0.3 + Math.random() * 0.4, 3),
+        new THREE.MeshStandardMaterial({ 
+          color: Math.random() > 0.5 ? 0x2d4a35 : 0x3d5a45,
+          roughness: 0.9
+        })
+      );
+      grassBlade.position.set(
+        (Math.random() - 0.5) * 180,
+        0.15,
+        (Math.random() - 0.5) * 220
+      );
+      grassBlade.rotation.z = (Math.random() - 0.5) * 0.4;
+      grassBlade.castShadow = false;
+      grassBlade.receiveShadow = true;
+      vegetationGroup.add(grassBlade);
+    }
+    scene.add(vegetationGroup);
+
+    const createForestTree = (x, z, scale = 1) => {
+      const treeGroup = new THREE.Group();
+      
+      const trunkGeometry = new THREE.CylinderGeometry(0.4 * scale, 0.5 * scale, 8 * scale, 12);
+      const trunkMaterial = new THREE.MeshStandardMaterial({ 
+        color: 0x3d2817,
+        roughness: 0.95
+      });
+      const trunk = new THREE.Mesh(trunkGeometry, trunkMaterial);
+      trunk.position.y = 4 * scale;
+      trunk.castShadow = true;
+      treeGroup.add(trunk);
+      
+      const foliageMaterial = new THREE.MeshStandardMaterial({ 
+        color: 0x1a4d2e,
+        roughness: 0.9
+      });
+      
+      const positions = [
+        [0, 8, 0, 3.5],
+        [1.2, 7.5, 1.2, 2.8],
+        [-1.2, 7.5, -1.2, 2.8],
+        [0, 10, 0, 3],
+        [0.8, 9, -0.8, 2.5],
+        [-0.8, 9, 0.8, 2.5],
+        [0, 11.5, 0, 2.2]
+      ];
+      
+      positions.forEach(([px, py, pz, radius]) => {
+        const foliage = new THREE.Mesh(
+          new THREE.SphereGeometry(radius * scale, 16, 16),
+          foliageMaterial
+        );
+        foliage.position.set(px * scale, py * scale, pz * scale);
+        foliage.castShadow = true;
+        treeGroup.add(foliage);
+      });
+      
+      treeGroup.position.set(x, 0, z);
+      return treeGroup;
+    };
+
+    for (let z = -100; z < 120; z += 8) {
+      for (let x = -45; x > -80; x -= 8) {
+        const randomOffset = (Math.random() - 0.5) * 4;
+        const scale = 0.8 + Math.random() * 0.6;
+        scene.add(createForestTree(x + randomOffset, z + randomOffset, scale));
+      }
+      for (let x = 45; x < 80; x += 8) {
+        const randomOffset = (Math.random() - 0.5) * 4;
+        const scale = 0.8 + Math.random() * 0.6;
+        scene.add(createForestTree(x + randomOffset, z + randomOffset, scale));
+      }
+    }
+
+    for (let i = 0; i < 40; i++) {
+      const bushGroup = new THREE.Group();
+      const bushMaterial = new THREE.MeshStandardMaterial({ 
+        color: 0x2d5a2d,
+        roughness: 0.9
+      });
+      
+      for (let j = 0; j < 3; j++) {
+        const bush = new THREE.Mesh(
+          new THREE.SphereGeometry(0.5 + Math.random() * 0.3, 12, 12),
+          bushMaterial
+        );
+        bush.position.set(
+          (Math.random() - 0.5) * 1.5,
+          0.3,
+          (Math.random() - 0.5) * 1.5
+        );
+        bush.castShadow = true;
+        bushGroup.add(bush);
+      }
+      
+      const side = Math.random() > 0.5 ? 1 : -1;
+      bushGroup.position.set(
+        side * (30 + Math.random() * 10),
+        0,
+        (Math.random() - 0.5) * 200
+      );
+      scene.add(bushGroup);
+    }
+
+    const createPathFence = (x, z, length, rotation) => {
+      const fenceGroup = new THREE.Group();
+      const woodMaterial = new THREE.MeshStandardMaterial({ 
+        color: 0x8B4513,
+        roughness: 0.8
+      });
+      
+      for (let i = 0; i < length; i += 3) {
+        const post = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.15, 0.18, 2.5, 12),
+          woodMaterial
+        );
+        post.position.set(i, 1.25, 0);
+        post.castShadow = true;
+        fenceGroup.add(post);
+
+        if (i < length - 3) {
+          [0.8, 1.5].forEach(height => {
+            const rail = new THREE.Mesh(
+              new THREE.CylinderGeometry(0.08, 0.08, 3, 8),
+              woodMaterial
+            );
+            rail.rotation.z = Math.PI / 2;
+            rail.position.set(i + 1.5, height, 0);
+            rail.castShadow = true;
+            fenceGroup.add(rail);
+          });
+        }
+      }
+      
+      fenceGroup.position.set(x, 0, z);
+      fenceGroup.rotation.y = rotation;
+      scene.add(fenceGroup);
+    };
+
+    createPathFence(-28, -100, 200, Math.PI / 2);
+    createPathFence(28, -100, 200, Math.PI / 2);
+
+    // REALISTIC HORSE - Much more detailed and organic
+    const horseGroup = new THREE.Group();
+    
+    // Body - elongated ellipsoid
+    const bodyGeometry = new THREE.SphereGeometry(1, 32, 32);
+    bodyGeometry.scale(1.5, 1.1, 2);
+    const bodyMaterial = new THREE.MeshStandardMaterial({ 
+      color: 0x654321,
+      roughness: 0.6,
+      metalness: 0.05
+    });
+    const horseBody = new THREE.Mesh(bodyGeometry, bodyMaterial);
+    horseBody.castShadow = true;
+    horseGroup.add(horseBody);
+
+    // Chest
+    const chestGeometry = new THREE.SphereGeometry(0.8, 24, 24);
+    chestGeometry.scale(1.2, 1.1, 1);
+    const chest = new THREE.Mesh(chestGeometry, bodyMaterial);
+    chest.position.set(0, 0.1, 1.3);
+    chest.castShadow = true;
+    horseGroup.add(chest);
+
+    // Neck - smooth curve
+    const neckCurve = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(0, 0.2, 1.5),
+      new THREE.Vector3(0, 0.8, 1.8),
+      new THREE.Vector3(0, 1.4, 2)
+    ]);
+    const neckGeometry = new THREE.TubeGeometry(neckCurve, 20, 0.4, 16, false);
+    const neck = new THREE.Mesh(neckGeometry, bodyMaterial);
+    neck.castShadow = true;
+    horseGroup.add(neck);
+
+    // Head - elongated and detailed
+    const headGeometry = new THREE.SphereGeometry(0.45, 24, 24);
+    headGeometry.scale(0.7, 0.9, 1.3);
+    const head = new THREE.Mesh(headGeometry, bodyMaterial);
+    head.position.set(0, 1.6, 2.4);
+    head.rotation.x = 0.2;
+    head.castShadow = true;
+    horseGroup.add(head);
+
+    // Snout
+    const snoutGeometry = new THREE.SphereGeometry(0.3, 20, 20);
+    snoutGeometry.scale(0.8, 0.7, 1.2);
+    const snout = new THREE.Mesh(snoutGeometry, new THREE.MeshStandardMaterial({ 
+      color: 0x5a4a3a,
+      roughness: 0.7
+    }));
+    snout.position.set(0, 1.45, 2.9);
+    snout.castShadow = true;
+    horseGroup.add(snout);
+
+    // Nostrils
+    [0.15, -0.15].forEach(x => {
+      const nostril = new THREE.Mesh(
+        new THREE.SphereGeometry(0.06, 12, 12),
+        new THREE.MeshStandardMaterial({ color: 0x2a1a1a })
+      );
+      nostril.position.set(x, 1.4, 3.05);
+      horseGroup.add(nostril);
+    });
+
+    // Eyes
+    [0.2, -0.2].forEach(x => {
+      const eyeWhite = new THREE.Mesh(
+        new THREE.SphereGeometry(0.12, 16, 16),
+        new THREE.MeshStandardMaterial({ color: 0xffffff })
+      );
+      eyeWhite.position.set(x, 1.75, 2.55);
+      horseGroup.add(eyeWhite);
+      
+      const pupil = new THREE.Mesh(
+        new THREE.SphereGeometry(0.08, 16, 16),
+        new THREE.MeshStandardMaterial({ color: 0x1a1a1a })
+      );
+      pupil.position.set(x, 1.75, 2.6);
+      horseGroup.add(pupil);
+    });
+
+    // Ears - pointed
+    const earGeometry = new THREE.ConeGeometry(0.15, 0.4, 12);
+    [-0.2, 0.2].forEach(x => {
+      const ear = new THREE.Mesh(earGeometry, bodyMaterial);
+      ear.position.set(x, 2, 2.2);
+      ear.rotation.x = -0.4;
+      ear.rotation.z = x * 0.3;
+      ear.castShadow = true;
+      horseGroup.add(ear);
+    });
+
+    // Mane - flowing and natural
+    const maneMaterial = new THREE.MeshStandardMaterial({ 
+      color: 0x2d1810,
+      roughness: 0.95
+    });
+    
+    for (let i = 0; i < 12; i++) {
+      const maneStrand = new THREE.Mesh(
+        new THREE.SphereGeometry(0.18, 12, 12),
+        maneMaterial
+      );
+      maneStrand.scale.set(0.4, 1.5, 0.4);
+      const t = i / 11;
+      maneStrand.position.set(
+        Math.sin(t * Math.PI) * 0.15,
+        1.7 - t * 0.7,
+        2 - t * 0.8
+      );
+      maneStrand.rotation.z = (Math.random() - 0.5) * 0.3;
+      horseGroup.add(maneStrand);
+    }
+
+    // Saddle - realistic leather
+    const saddleGeometry = new THREE.SphereGeometry(0.7, 20, 20);
+    saddleGeometry.scale(1.2, 0.4, 1.3);
+    const saddle = new THREE.Mesh(
+      saddleGeometry,
+      new THREE.MeshStandardMaterial({ 
+        color: 0x6B4423,
+        roughness: 0.4,
+        metalness: 0.2
+      })
+    );
+    saddle.position.set(0, 0.5, 0.2);
+    horseGroup.add(saddle);
+
+    // Stirrups
+    [-0.8, 0.8].forEach(x => {
+      const stirrup = new THREE.Mesh(
+        new THREE.TorusGeometry(0.15, 0.04, 8, 16),
+        new THREE.MeshStandardMaterial({ color: 0x8B7355, metalness: 0.5 })
+      );
+      stirrup.position.set(x, -0.2, 0.2);
+      stirrup.rotation.x = Math.PI / 2;
+      horseGroup.add(stirrup);
+    });
+
+    // Bridle
+    const bridleMaterial = new THREE.MeshStandardMaterial({ 
+      color: 0x3a3a3a,
+      metalness: 0.7,
+      roughness: 0.3
+    });
+    
+    const bridleRing = new THREE.Mesh(
+      new THREE.TorusGeometry(0.25, 0.04, 12, 20),
+      bridleMaterial
+    );
+    bridleRing.position.set(0, 1.5, 2.85);
+    bridleRing.rotation.x = Math.PI / 2;
+    horseGroup.add(bridleRing);
+
+    // Reins
+    const reinCurve1 = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(0.2, 1.5, 2.85),
+      new THREE.Vector3(0.3, 1.3, 1.5),
+      new THREE.Vector3(0.4, 1.2, 0.5)
+    ]);
+    const reinGeometry1 = new THREE.TubeGeometry(reinCurve1, 20, 0.02, 8, false);
+    const rein1 = new THREE.Mesh(reinGeometry1, bridleMaterial);
+    horseGroup.add(rein1);
+    
+    const reinCurve2 = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(-0.2, 1.5, 2.85),
+      new THREE.Vector3(-0.3, 1.3, 1.5),
+      new THREE.Vector3(-0.4, 1.2, 0.5)
+    ]);
+    const reinGeometry2 = new THREE.TubeGeometry(reinCurve2, 20, 0.02, 8, false);
+    const rein2 = new THREE.Mesh(reinGeometry2, bridleMaterial);
+    horseGroup.add(rein2);
+
+    // Realistic LEGS with joints
+    const legs = [];
+    const legMaterial = new THREE.MeshStandardMaterial({ 
+      color: 0x4d3319,
+      roughness: 0.6
+    });
+    
+    const legPositions = [
+      { x: -0.7, z: 1.3, isFront: true },   // Front left
+      { x: 0.7, z: 1.3, isFront: true },    // Front right
+      { x: -0.7, z: -1.2, isFront: false }, // Back left
+      { x: 0.7, z: -1.2, isFront: false }   // Back right
+    ];
+    
+    legPositions.forEach(({ x, z, isFront }) => {
+      const legGroup = new THREE.Group();
+      
+      // Upper leg (thigh)
+      const upperLegGeometry = new THREE.CylinderGeometry(0.22, 0.18, 1.1, 16);
+      const upperLeg = new THREE.Mesh(upperLegGeometry, legMaterial);
+      upperLeg.position.y = -0.55;
+      upperLeg.castShadow = true;
+      legGroup.add(upperLeg);
+      
+      // Knee joint
+      const knee = new THREE.Mesh(
+        new THREE.SphereGeometry(0.2, 16, 16),
+        legMaterial
+      );
+      knee.position.y = -1.1;
+      knee.castShadow = true;
+      legGroup.add(knee);
+      
+      // Lower leg
+      const lowerLegGeometry = new THREE.CylinderGeometry(0.15, 0.12, 1, 16);
+      const lowerLeg = new THREE.Mesh(lowerLegGeometry, legMaterial);
+      lowerLeg.position.y = -1.6;
+      lowerLeg.castShadow = true;
+      legGroup.add(lowerLeg);
+      
+      // Hoof - realistic shape
+      const hoofGeometry = new THREE.SphereGeometry(0.15, 16, 16);
+      hoofGeometry.scale(1, 0.6, 1.2);
+      const hoof = new THREE.Mesh(
+        hoofGeometry,
+        new THREE.MeshStandardMaterial({ 
+          color: 0x1a1a1a,
+          roughness: 0.8
+        })
+      );
+      hoof.position.y = -2.1;
+      hoof.castShadow = true;
+      legGroup.add(hoof);
+      
+      legGroup.position.set(x, 0, z);
+      horseGroup.add(legGroup);
+      legs.push({ group: legGroup, isFront, knee, upperLeg, lowerLeg });
+    });
+
+    // Tail - flowing and dynamic
+    const tailCurve = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(0, 0.3, -1.8),
+      new THREE.Vector3(0, 0, -2.2),
+      new THREE.Vector3(0, -0.5, -2.6),
+      new THREE.Vector3(0, -1, -2.8)
+    ]);
+    const tailGeometry = new THREE.TubeGeometry(tailCurve, 20, 0.18, 12, false);
+    const tail = new THREE.Mesh(tailGeometry, maneMaterial);
+    tail.castShadow = true;
+    horseGroup.add(tail);
+
+    // Rider - realistic proportions
+    const riderMaterial = new THREE.MeshStandardMaterial({ 
+      color: selectedRider.color,
+      roughness: 0.7
+    });
+    
+    // Rider legs
+    [-0.35, 0.35].forEach(x => {
+      const thigh = new THREE.Mesh(
+        new THREE.CapsuleGeometry(0.18, 0.7, 12, 20),
+        riderMaterial
+      );
+      thigh.position.set(x, 1.1, 0.3);
+      thigh.rotation.x = 1;
+      thigh.castShadow = true;
+      horseGroup.add(thigh);
+      
+      const calf = new THREE.Mesh(
+        new THREE.CapsuleGeometry(0.15, 0.6, 12, 20),
+        riderMaterial
+      );
+      calf.position.set(x, 0.2, 0.8);
+      calf.rotation.x = 0.5;
+      calf.castShadow = true;
+      horseGroup.add(calf);
+      
+      // Riding boots
+      const boot = new THREE.Mesh(
+        new THREE.CapsuleGeometry(0.12, 0.3, 10, 16),
+        new THREE.MeshStandardMaterial({ color: 0x2a2a2a, roughness: 0.3 })
+      );
+      boot.position.set(x, -0.1, 1.1);
+      boot.rotation.x = 0.3;
+      boot.castShadow = true;
+      horseGroup.add(boot);
+    });
+
+    // Torso
+    const torso = new THREE.Mesh(
+      new THREE.CapsuleGeometry(0.4, 1, 16, 24),
+      riderMaterial
+    );
+    torso.position.set(0, 2, 0);
+    torso.rotation.x = 0.3;
+    torso.castShadow = true;
+    horseGroup.add(torso);
+
+    // Arms
+    [-0.45, 0.45].forEach(x => {
+      const shoulder = new THREE.Mesh(
+        new THREE.SphereGeometry(0.15, 16, 16),
+        riderMaterial
+      );
+      shoulder.position.set(x, 2.2, 0);
+      shoulder.castShadow = true;
+      horseGroup.add(shoulder);
+      
+      const upperArm = new THREE.Mesh(
+        new THREE.CapsuleGeometry(0.12, 0.5, 10, 16),
+        riderMaterial
+      );
+      upperArm.position.set(x * 1.1, 1.8, 0.3);
+      upperArm.rotation.x = 0.7;
+      upperArm.rotation.z = x * 0.2;
+      upperArm.castShadow = true;
+      horseGroup.add(upperArm);
+      
+      const forearm = new THREE.Mesh(
+        new THREE.CapsuleGeometry(0.1, 0.4, 10, 16),
+        riderMaterial
+      );
+      forearm.position.set(x * 1.15, 1.4, 0.6);
+      forearm.rotation.x = 0.4;
+      forearm.rotation.z = x * 0.15;
+      forearm.castShadow = true;
+      horseGroup.add(forearm);
+    });
+
+    // Head
+    const riderHead = new THREE.Mesh(
+      new THREE.SphereGeometry(0.38, 24, 24),
+      new THREE.MeshStandardMaterial({ 
+        color: selectedRider.skinColor,
+        roughness: 0.85
+      })
+    );
+    riderHead.position.set(0, 2.85, 0);
+    riderHead.castShadow = true;
+    horseGroup.add(riderHead);
+
+    // Helmet - detailed
+    const helmetGeometry = new THREE.SphereGeometry(0.4, 24, 24, 0, Math.PI * 2, 0, Math.PI * 0.6);
+    const helmet = new THREE.Mesh(
+      helmetGeometry,
+      new THREE.MeshStandardMaterial({ 
+        color: 0x1a1a1a,
+        roughness: 0.2,
+        metalness: 0.7
+      })
+    );
+    helmet.position.set(0, 3.05, 0);
+    helmet.castShadow = true;
+    horseGroup.add(helmet);
+    
+    const visor = new THREE.Mesh(
+      new THREE.SphereGeometry(0.38, 20, 20, 0, Math.PI * 0.65, Math.PI * 0.35, Math.PI * 0.35),
+      new THREE.MeshStandardMaterial({ 
+        color: 0x000000,
+        transparent: true,
+        opacity: 0.4,
+        metalness: 0.9,
+        roughness: 0.1
+      })
+    );
+    visor.position.set(0, 2.8, 0.15);
+    horseGroup.add(visor);
+
+    horseGroup.position.set(0, 0.5, -90);
+    scene.add(horseGroup);
+    gameStateRef.current.horse = horseGroup;
+    gameStateRef.current.legs = legs;
+    gameStateRef.current.tail = tail;
+
+    // Obstacles
+    const obstacles = [];
+    const obstaclePositions = [
+      { x: 0, z: -70, height: 2 },
+      { x: -10, z: -55, height: 2.2 },
+      { x: 10, z: -40, height: 2.1 },
+      { x: -8, z: -25, height: 2.3 },
+      { x: 8, z: -10, height: 2.4 },
+      { x: 0, z: 5, height: 2.2 },
+      { x: -12, z: 20, height: 2.5 },
+      { x: 12, z: 35, height: 2.3 },
+      { x: 0, z: 50, height: 2.6 },
+      { x: -10, z: 65, height: 2.4 },
+      { x: 10, z: 80, height: 2.7 },
+      { x: 0, z: 95, height: 2.5 }
+    ];
+
+    obstaclePositions.forEach((pos, index) => {
+      const obstacleGroup = new THREE.Group();
+      
+      const poleMaterial = new THREE.MeshStandardMaterial({ 
+        color: 0xe8e8e8,
+        roughness: 0.6,
+        metalness: 0.3
+      });
+      
+      [-2.5, 2.5].forEach(xOffset => {
+        const pole = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.12, 0.12, 3.5, 16),
+          poleMaterial
+        );
+        pole.position.set(xOffset, 1.75, 0);
+        pole.castShadow = true;
+        obstacleGroup.add(pole);
+        
+        const cap = new THREE.Mesh(
+          new THREE.SphereGeometry(0.15, 12, 12),
+          new THREE.MeshStandardMaterial({ color: 0xff0000, metalness: 0.5 })
+        );
+        cap.position.set(xOffset, 3.5, 0);
+        obstacleGroup.add(cap);
+      });
+
+      const barrierColors = [
+        [0xFF0000, 0xFFFFFF], [0x0066CC, 0xFFFFFF], 
+        [0xFFD700, 0x000000], [0x00AA00, 0xFFFFFF],
+        [0xFF1493, 0xFFFFFF], [0xFF8C00, 0x000000]
+      ];
+      const colors = barrierColors[index % barrierColors.length];
+      
+      const barrierGeometry = new THREE.CylinderGeometry(0.15, 0.15, 5.5, 16);
+      const barrierMaterial = new THREE.MeshStandardMaterial({ 
+        color: colors[0],
+        roughness: 0.5
+      });
+      const barrier = new THREE.Mesh(barrierGeometry, barrierMaterial);
+      barrier.rotation.z = Math.PI / 2;
+      barrier.position.set(0, pos.height, 0);
+      barrier.castShadow = true;
+      obstacleGroup.add(barrier);
+      
+      for (let i = 0; i < 3; i++) {
+        const stripe = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.16, 0.16, 0.8, 16),
+          new THREE.MeshStandardMaterial({ color: colors[1], roughness: 0.5 })
+        );
+        stripe.rotation.z = Math.PI / 2;
+        stripe.position.set(i * 1.5 - 1.5, pos.height, 0);
+        obstacleGroup.add(stripe);
+      }
+
+      obstacleGroup.position.set(pos.x, 0, pos.z);
+      scene.add(obstacleGroup);
+      obstacles.push({ mesh: obstacleGroup, position: pos, cleared: false, height: pos.height });
+    });
+
+    gameStateRef.current.obstacles = obstacles;
+
+    // Finish line with spectators
+    const bannerGeometry = new THREE.PlaneGeometry(15, 3);
+    const bannerMaterial = new THREE.MeshStandardMaterial({ 
+      color: 0xFFFFFF,
+      side: THREE.DoubleSide
+    });
+    const banner = new THREE.Mesh(bannerGeometry, bannerMaterial);
+    banner.position.set(0, 4, 110);
+    scene.add(banner);
+    
+    const finishText = new THREE.Mesh(
+      new THREE.PlaneGeometry(10, 2),
+      new THREE.MeshBasicMaterial({ color: 0xFF0000 })
+    );
+    finishText.position.set(0, 4, 109.9);
+    scene.add(finishText);
+
+    const createSpectator = (x, z) => {
+      const spectatorGroup = new THREE.Group();
+      
+      const body = new THREE.Mesh(
+        new THREE.CapsuleGeometry(0.3, 0.8, 8, 16),
+        new THREE.MeshStandardMaterial({ 
+          color: [0xFF6B6B, 0x4ECDC4, 0xFFE66D, 0x95E1D3, 0xFF8C00][Math.floor(Math.random() * 5)],
+          roughness: 0.7
+        })
+      );
+      body.position.y = 1.2;
+      body.castShadow = true;
+      spectatorGroup.add(body);
+      
+      const head = new THREE.Mesh(
+        new THREE.SphereGeometry(0.25, 16, 16),
+        new THREE.MeshStandardMaterial({ color: 0xffdbac, roughness: 0.8 })
+      );
+      head.position.y = 2;
+      head.castShadow = true;
+      spectatorGroup.add(head);
+      
+      [-0.35, 0.35].forEach(xOffset => {
+        const arm = new THREE.Mesh(
+          new THREE.CapsuleGeometry(0.1, 0.5, 6, 12),
+          new THREE.MeshStandardMaterial({ 
+            color: [0xFF6B6B, 0x4ECDC4, 0xFFE66D, 0x95E1D3, 0xFF8C00][Math.floor(Math.random() * 5)]
+          })
+        );
+        arm.position.set(xOffset, 1.8, 0);
+        arm.rotation.z = xOffset > 0 ? -0.8 : 0.8;
+        arm.castShadow = true;
+        spectatorGroup.add(arm);
+      });
+      
+      spectatorGroup.position.set(x, 0, z);
+      spectatorGroup.userData.originalY = spectatorGroup.position.y;
+      spectatorGroup.userData.animOffset = Math.random() * Math.PI * 2;
+      return spectatorGroup;
+    };
+
+    const spectators = [];
+    for (let i = -20; i < 20; i += 3) {
+      const leftSpectator = createSpectator(-15 + (Math.random() - 0.5) * 3, 105 + i);
+      const rightSpectator = createSpectator(15 + (Math.random() - 0.5) * 3, 105 + i);
+      scene.add(leftSpectator);
+      scene.add(rightSpectator);
+      spectators.push(leftSpectator, rightSpectator);
+    }
+    gameStateRef.current.spectators = spectators;
+
+    camera.position.set(0, 10, -82);
+    camera.lookAt(0, 2, -80);
+
+    const keys = {};
+    const handleKeyDown = (e) => { 
+      if (e.key === 'PageUp') {
+        keys['pageup'] = true;
+      }
+    };
+    const handleKeyUp = (e) => { 
+      if (e.key === 'PageUp') {
+        keys['pageup'] = false;
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+
+    gameStateRef.current.startTime = Date.now();
+    let animationId;
+    let faultCount = 0;
+
+    const animate = () => {
+      if (gamePaused) {
+        animationId = requestAnimationFrame(animate);
+        return;
+      }
+
+      const horse = gameStateRef.current.horse;
+      const velocity = gameStateRef.current.velocity;
+      const legs = gameStateRef.current.legs;
+      const tail = gameStateRef.current.tail;
+
+      // FAST AUTO-RUN
+      velocity.z = selectedRider.speed;
+
+      // REALISTIC GALLOP ANIMATION
+      gameStateRef.current.gallopPhase += 0.35;
+      const gallopTime = gameStateRef.current.gallopPhase;
+      
+      if (legs && !gameStateRef.current.isJumping) {
+        // Realistic gallop - legs move in diagonal pairs
+        legs.forEach((leg, index) => {
+          const phase = leg.isFront ? gallopTime : gallopTime + Math.PI;
+          const isLeft = index % 2 === 0;
+          const sidedness = isLeft ? 0 : Math.PI;
+          
+          // Forward/backward swing
+          const swingAngle = Math.sin(phase + sidedness) * (leg.isFront ? 1 : 0.7);
+          leg.group.rotation.x = swingAngle;
+          
+          // Knee bend during gallop
+          leg.knee.position.y = -1.1 + Math.abs(Math.sin(phase + sidedness)) * 0.2;
+          leg.lowerLeg.rotation.x = Math.max(0, Math.sin(phase + sidedness)) * 0.8;
+        });
+        
+        // Horse body bobbing - more pronounced
+        horse.position.y = 0.5 + Math.abs(Math.sin(gallopTime * 0.5)) * 0.35;
+        horse.rotation.z = Math.sin(gallopTime * 0.5) * 0.08;
+        
+        // Head bobbing
+        head.rotation.x = 0.2 + Math.sin(gallopTime * 0.5) * 0.15;
+      }
+
+      // Tail swaying dynamically
+      if (tail) {
+        tail.rotation.x = Math.sin(gallopTime * 0.4) * 0.4;
+        tail.rotation.y = Math.sin(gallopTime * 0.3) * 0.2;
+      }
+
+      // Jump
+      if (keys['pageup'] && !gameStateRef.current.isJumping && horse.position.y <= 0.85) {
+        gameStateRef.current.isJumping = true;
+        velocity.y = selectedRider.jumpPower;
+        
+        // Extend legs during jump
+        if (legs) {
+          legs.forEach(leg => {
+            leg.group.rotation.x = -0.3;
+          });
+        }
+      }
+
+      horse.position.z += velocity.z;
+
+      // Gravity
+      if (gameStateRef.current.isJumping) {
+        velocity.y -= 0.015;
+        horse.position.y += velocity.y;
+        
+        if (horse.position.y <= 0.5) {
+          horse.position.y = 0.5;
+          gameStateRef.current.isJumping = false;
+          velocity.y = 0;
+        }
+      }
+
+      // Animate spectators
+      const time = Date.now() * 0.003;
+      spectators.forEach((spectator) => {
+        const offset = spectator.userData.animOffset;
+        spectator.position.y = Math.sin(time + offset) * 0.15;
+        spectator.rotation.z = Math.sin(time * 2 + offset) * 0.1;
+        
+        spectator.children.forEach((child, index) => {
+          if (index >= 2) {
+            child.rotation.z = child.position.x > 0 
+              ? -0.8 + Math.sin(time * 3 + offset) * 0.4
+              : 0.8 - Math.sin(time * 3 + offset) * 0.4;
+          }
+        });
+      });
+
+      // Obstacle collision
+      obstacles.forEach((obstacle, index) => {
+        if (obstacle.cleared) return;
+
+        const distance = Math.sqrt(
+          Math.pow(horse.position.x - obstacle.position.x, 2) +
+          Math.pow(horse.position.z - obstacle.position.z, 2)
+        );
+
+        if (distance < 3) {
+          if (horse.position.y < obstacle.height - 0.3) {
+            faultCount++;
+            obstacle.mesh.rotation.x = 0.3;
+            setTimeout(() => { obstacle.mesh.rotation.x = 0; }, 500);
+          } else if (horse.position.z > obstacle.position.z + 2) {
+            obstacle.cleared = true;
+            gameStateRef.current.clearedObstacles.add(index);
+          }
+        }
+      });
+
+      // Dynamic camera follow
+      const targetX = horse.position.x;
+      const targetZ = horse.position.z - 15;
+      const targetY = horse.position.y + 14;
+      
+      camera.position.x += (targetX - camera.position.x) * 0.12;
+      camera.position.z += (targetZ - camera.position.z) * 0.12;
+      camera.position.y += (targetY - camera.position.y) * 0.12;
+      camera.lookAt(horse.position.x, horse.position.y + 2, horse.position.z + 10);
+
+      const elapsed = (Date.now() - gameStateRef.current.startTime) / 1000;
+      const points = Math.max(0, 1000 - faultCount * 100 - Math.floor(elapsed * 2));
+      setScore({
+        time: elapsed.toFixed(1),
+        faults: faultCount,
+        points: points
+      });
+
+      if (horse.position.z > 108) {
+        setFinished(true);
+        setGamePaused(true);
+      }
+
+      renderer.render(scene, camera);
+      animationId = requestAnimationFrame(animate);
+    };
+
+    animate();
+
+    const handleResize = () => {
+      if (!containerRef.current) return;
+      camera.aspect = containerRef.current.clientWidth / containerRef.current.clientHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(containerRef.current.clientWidth, containerRef.current.clientHeight);
+    };
+    window.addEventListener('resize', handleResize);
+
+    return () => {
+      cancelAnimationFrame(animationId);
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('resize', handleResize);
+      if (containerRef.current && renderer.domElement) {
+        containerRef.current.removeChild(renderer.domElement);
+      }
+      renderer.dispose();
+    };
+  }, [selectedRider, raceStarted, gamePaused, horseCareComplete]);
+
+  const handleStartGame = () => {
+    if (!selectedRider) return;
+    setGameStarted(true);
+    setCountdown(5);
+    setScore({ time: 0, faults: 0, points: 1000 });
+    setFinished(false);
+  };
+
+  const handleRestart = () => {
+    setGameStarted(false);
+    setRaceStarted(false);
+    setGamePaused(false);
+    setFinished(false);
+    setHorseCareComplete(false);
+    setCountdown(5);
+    setScore({ time: 0, faults: 0, points: 0 });
+  };
+
+  const handleHorseCareComplete = () => {
+    setHorseCareComplete(true);
+    setTimeout(() => handleStartGame(), 500);
+  };
+
+  if (!selectedRider) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-green-50 via-blue-50 to-green-100 p-4 md:p-8">
+        <div className="max-w-6xl mx-auto">
+          <div className="text-center mb-12">
+            <h1 className="text-4xl md:text-5xl font-bold text-gray-900 mb-4">
+              🏇 Show Jumping Champion
+            </h1>
+            <p className="text-lg md:text-xl text-gray-600">
+              Wähle deinen Reiter und springe zum Sieg!
+            </p>
+          </div>
+          <CharacterSelector riders={RIDERS} onSelect={setSelectedRider} />
+        </div>
+      </div>
+    );
+  }
+
+  if (!horseCareComplete) {
+    return <HorseCare rider={selectedRider} onComplete={handleHorseCareComplete} onBack={() => setSelectedRider(null)} />;
+  }
+
+  if (gameStarted && countdown > 0) {
+    return (
+      <div className="relative w-full h-screen bg-gradient-to-br from-green-900 via-green-700 to-green-900 flex items-center justify-center overflow-hidden">
+        <div className="absolute inset-0 bg-black/30" />
+        <div className="relative z-10 text-center">
+          <h2 className="text-white text-4xl md:text-6xl font-bold mb-8">
+            Mach dich bereit!
+          </h2>
+          <div className="text-white text-9xl md:text-[200px] font-bold animate-pulse">
+            {countdown}
+          </div>
+          <p className="text-white text-2xl md:text-3xl mt-8">
+            Das Rennen beginnt gleich...
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="relative w-full h-screen bg-black overflow-hidden">
+      <div ref={containerRef} className="w-full h-full" />
+      
+      <ScoreBoard score={score} finished={finished} />
+
+      <div className="absolute top-4 right-4 flex gap-2">
+        <Button
+          onClick={() => setGamePaused(!gamePaused)}
+          variant="secondary"
+          size="icon"
+          className="bg-white/90 backdrop-blur"
+        >
+          {gamePaused ? <Play className="w-5 h-5" /> : <Pause className="w-5 h-5" />}
+        </Button>
+        <Button
+          onClick={handleRestart}
+          variant="secondary"
+          size="icon"
+          className="bg-white/90 backdrop-blur"
+        >
+          <RotateCcw className="w-5 h-5" />
+        </Button>
+      </div>
+
+      <div className="absolute bottom-8 left-1/2 transform -translate-x-1/2">
+        <Card className="bg-white/95 backdrop-blur border-2 border-green-500 shadow-2xl">
+          <CardContent className="p-4">
+            <p className="text-xl font-bold text-center text-green-600">
+              🎮 Drücke PgUp (Bild ↑) zum Springen!
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+
+      {finished && (
+        <div className="absolute inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <Card className="w-full max-w-md">
+            <CardContent className="p-8 text-center space-y-6">
+              <div className="text-6xl mb-4">🎉</div>
+              <div className="w-20 h-20 mx-auto bg-yellow-100 rounded-full flex items-center justify-center">
+                <Trophy className="w-10 h-10 text-yellow-600" />
+              </div>
+              <h2 className="text-3xl font-bold">Glückwunsch!</h2>
+              <p className="text-xl text-gray-600">Die Zuschauer jubeln! 🎊</p>
+              <div className="space-y-3">
+                <div className="bg-gray-50 p-4 rounded-lg">
+                  <p className="text-sm text-gray-600">Zeit</p>
+                  <p className="text-2xl font-bold">{score.time}s</p>
+                </div>
+                <div className="bg-gray-50 p-4 rounded-lg">
+                  <p className="text-sm text-gray-600">Fehler</p>
+                  <p className="text-2xl font-bold">{score.faults}</p>
+                </div>
+                <div className="bg-green-50 p-4 rounded-lg">
+                  <p className="text-sm text-gray-600">Gesamtpunkte</p>
+                  <p className="text-3xl font-bold text-green-600">{score.points}</p>
+                </div>
+              </div>
+              <div className="space-y-2">
+                <Button onClick={handleRestart} className="w-full" size="lg">
+                  <RotateCcw className="w-5 h-5 mr-2" />
+                  Nochmal spielen
+                </Button>
+                <Button onClick={() => { setSelectedRider(null); setHorseCareComplete(false); }} variant="outline" className="w-full">
+                  Reiter wechseln
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+    </div>
+  );
+}

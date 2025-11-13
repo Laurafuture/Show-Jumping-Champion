@@ -1,0 +1,41 @@
+import React, { useState, useEffect, useRef } from 'react';
+import * as THREE from 'three';
+import { Card, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Progress } from "@/components/ui/progress";
+import { Sparkles, Droplets, ShoppingBag, CheckCircle2, ArrowLeft } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
+
+const CARE_STEPS = [
+  {
+    id: 'brush',
+    title: 'Pferd putzen',
+    icon: Sparkles,
+    description: 'Bürste das Fell sauber',
+    color: 'bg-purple-500',
+    emoji: '🧹'
+  },
+  {
+    id: 'wash',
+    title: 'Pferd waschen',
+    icon: Droplets,
+    description: 'Wasche das Pferd gründlich',
+    color: 'bg-blue-500',
+    emoji: '💦'
+  },
+  {
+    id: 'saddle',
+    title: 'Pferd satteln',
+    icon: ShoppingBag,
+    description: 'Lege den Sattel an',
+    color: 'bg-orange-500',
+    emoji: '🏇'
+  },
+  {
+    id: 'bridle',
+    title: 'Pferd zäumen',
+    icon: CheckCircle2,
+    description: 'Lege das Zaumzeug an',
+    color: 'bg-green-500',
+    emoji: '🎯'
+ 
